@@ -1,0 +1,59 @@
+.gemini/
+GEMINI.md
+
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Output of the go coverage tool
+*.coverprofile
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency directories (vendor/ for Go modules, Godeps for older vendoring)
+vendor/
+Godeps/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE/editor directories and files
+.idea/
+.vscode/
+*.swp
+
+# Logs and temporary files
+*.log
+*.tmp
+*.cache
+
+# Env files and secrets
+.env
+.env.*
+
+# Build output
+bin/
+build/
+dist/
+
+# Module/package-specific files
+*.mod
+*.sum
+
+# Go test binary
+main.test
+
+# Generated Swagger/OpenAPI docs (optional, if using swag)
+docs/
+swagger/
+
+# Misc
+coverage/
