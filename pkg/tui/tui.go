@@ -10,7 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
-	"github.com/charmbracelet/bubbletea"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nickhildpac/cli-gocurl/pkg/executor"
 	"github.com/nickhildpac/cli-gocurl/pkg/parser"
@@ -38,21 +38,11 @@ type responseMsg struct {
 }
 
 var (
-	// Styles
-	titleStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("205")),
-		Bold(true).
-		Padding(0, 1)
-
-	sectionStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("240"))
-
+	titleStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Padding(0, 1)
+	sectionStyle    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
 	suggestionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	activeStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-	helpStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-
-	// Autocomplete data
+	// helpStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	commands = []string{"/GET", "/POST", "/PUT", "/DELETE", "/HISTORY", "/CLEAR", "/HELP", "/EXIT"}
 	flags    = []string{"-H", "-d", "-v", "-o"}
 )
@@ -73,14 +63,14 @@ func InitialModel() model {
 	outputVP.SetContent("Response output will appear here.")
 
 	return model{
-		textInput:      ti,
-		spinner:        s,
-	historyViewport: historyVP,
-		outputViewport: outputVP,
-		suggestions:    []string{},
-		requestHistory: []string{},
-		historyIndex:   0,
-		status:         "N/A",
+		textInput:       ti,
+		spinner:         s,
+		historyViewport: historyVP,
+		outputViewport:  outputVP,
+		suggestions:     []string{},
+		requestHistory:  []string{},
+		historyIndex:    0,
+		status:          "N/A",
 	}
 }
 
@@ -151,24 +141,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		sectionWidth := msg.Width - 2
 
-		// Input section height is static
-		inputHeight := 4 + (len(m.suggestions)+3)/4
-		
-		// Remaining height is split between history and output
-		remainingHeight := msg.Height - inputHeight - 3 // 3 for borders/margins
-		historyHeight := remainingHeight / 3
-		outputHeight := remainingHeight - historyHeight
+		// 40% for input, 60% for output
+		inputSectionHeight := m.height * 2 / 5
+		outputSectionHeight := m.height - inputSectionHeight - 2
 
-		m.textInput.Width = sectionWidth - 2
-		
-		m.historyViewport.Width = sectionWidth
-		m.historyViewport.Height = historyHeight
-		
-m.outputViewport.Width = sectionWidth
-		m.outputViewport.Height = outputHeight
+		m.textInput.Width = m.width - 4
 
+		// History viewport takes up the space in the input section not used by the text input itself
+		m.historyViewport.Width = m.width - 4
+		m.historyViewport.Height = inputSectionHeight - 4
+
+		m.outputViewport.Width = m.width - 4
+		m.outputViewport.Height = outputSectionHeight - 2
 
 	case responseMsg:
 		m.isLoading = false
@@ -289,7 +274,6 @@ func makeRequest(method string, args []string) tea.Cmd {
 		url := args[0]
 		fs.Parse(args[1:])
 
-		// Add -i to include headers in the output
 		curlArgs := []string{"curl", "-i", "-X", method, url}
 		for _, h := range headers {
 			curlArgs = append(curlArgs, "-H", h)
@@ -309,10 +293,8 @@ func makeRequest(method string, args []string) tea.Cmd {
 			return responseMsg{status: "Execution Error", body: fmt.Sprintf("%v\n%s", err, output)}
 		}
 
-		// Parse response
 		parts := strings.SplitN(output, "\r\n\r\n", 2)
 		if len(parts) < 2 {
-			// Handle cases with no body or different line endings
 			parts = strings.SplitN(output, "\n\n", 2)
 			if len(parts) < 2 {
 				return responseMsg{status: "Parse Error", body: "Could not separate headers from body."}
@@ -333,6 +315,7 @@ func (m *model) getUniqueHistory() string {
 		cmd := m.requestHistory[i]
 		if !seen[cmd] {
 			seen[cmd] = true
+
 			uniqueHistory = append(uniqueHistory, cmd)
 		}
 		if len(uniqueHistory) >= 10 {
@@ -352,10 +335,15 @@ func (m *model) getUniqueHistory() string {
 
 func (m model) View() string {
 	// --- INPUT SECTION ---
-	var inputBuilder strings.Builder
-	inputBuilder.WriteString(m.textInput.View())
+	var inputContent strings.Builder
+	if m.isLoading {
+		inputContent.WriteString(m.spinner.View() + " Executing request...")
+	} else {
+		inputContent.WriteString(m.textInput.View())
+	}
+
 	if m.isSuggesting && len(m.suggestions) > 0 {
-		inputBuilder.WriteString("\n")
+		inputContent.WriteString("\n")
 		var suggestionParts []string
 		for i, sug := range m.suggestions {
 			if i == m.activeSuggestion {
@@ -364,35 +352,29 @@ func (m model) View() string {
 				suggestionParts = append(suggestionParts, suggestionStyle.Render(sug))
 			}
 		}
-		inputBuilder.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, suggestionParts...))
-	} else {
-		inputBuilder.WriteString("\n" + helpStyle.Render("↑/↓ for history, <tab> to complete"))
+		inputContent.WriteString(lipgloss.JoinHorizontal(lipgloss.Left, suggestionParts...))
 	}
-	inputSection := sectionStyle.
-		Copy().
-		Width(m.width - 2).
-		Height(4+(len(m.suggestions)+3)/4).
-		Render(titleStyle.Render("Input") + "\n" + inputBuilder.String())
 
-	// --- HISTORY SECTION ---
-	historySection := sectionStyle.
-		Copy().
+	inputHistory := lipgloss.JoinVertical(lipgloss.Left,
+		m.historyViewport.View(),
+		inputContent.String(),
+	)
+
+	inputSection := sectionStyle.Copy().
 		Width(m.width - 2).
-		Height(m.historyViewport.Height).
-		Render(titleStyle.Render("History") + "\n" + m.historyViewport.View())
+		Height(m.height * 2 / 5).
+		Render(titleStyle.Render("Input") + "\n" + inputHistory)
 
 	// --- OUTPUT SECTION ---
 	statusLine := fmt.Sprintf("Status: %s", m.status)
-	outputSection := sectionStyle.
-		Copy().
+	outputContent := statusLine + "\n" + m.outputViewport.View()
+	outputSection := sectionStyle.Copy().
 		Width(m.width - 2).
-		Height(m.outputViewport.Height).
-		Render(titleStyle.Render("Output") + "\n" + statusLine + "\n" + m.outputViewport.View())
+		Height(m.height - lipgloss.Height(inputSection) - 2).
+		Render(titleStyle.Render("Output") + "\n" + outputContent)
 
-	// --- FINAL LAYOUT ---
 	return lipgloss.JoinVertical(lipgloss.Left,
 		inputSection,
-		historySection,
 		outputSection,
 	)
 }
@@ -410,11 +392,11 @@ func formatJSON(raw string) string {
 	var parsed json.RawMessage
 	err := json.Unmarshal([]byte(raw), &parsed)
 	if err != nil {
-		return raw // Not valid JSON, return as is
+		return raw
 	}
 	pretty, err := json.MarshalIndent(parsed, "", "  ")
 	if err != nil {
-		return raw // Should not happen if unmarshal succeeded
+		return raw
 	}
 	return string(pretty)
 }
