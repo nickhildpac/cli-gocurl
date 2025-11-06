@@ -17,7 +17,7 @@ GEMINI.md
 go.work
 go.work.sum
 
-# Dependency directories (vendor/ for Go modules, Godeps for older vendoring)
+# Dependency directories (vendor/ for Go mDeliveryodules, Godeps for older vendoring)
 vendor/
 Godeps/
 
@@ -45,7 +45,6 @@ build/
 dist/
 
 # Module/package-specific files
-*.mod
 *.sum
 
 # Go test binary
