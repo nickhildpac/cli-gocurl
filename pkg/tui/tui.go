@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"strings"
@@ -15,50 +16,71 @@ import (
 	"github.com/nickhildpac/cli-gocurl/pkg/parser"
 )
 
-// ... (styles and other definitions will go here)
-
 type model struct {
-	viewport         viewport.Model
 	textInput        textinput.Model
+	historyViewport  viewport.Model
+	outputViewport   viewport.Model
 	spinner          spinner.Model
 	isLoading        bool
 	history          []string
 	suggestions      []string
 	activeSuggestion int
 	isSuggesting     bool
+	requestHistory   []string
+	historyIndex     int
+	status           string
+	width, height    int
 }
 
-type responseMsg string
+type responseMsg struct {
+	status string
+	body   string
+}
 
 var (
-	inputStyle        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	suggestionStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	activeStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-	viewportStyle     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	helpStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	commands          = []string{"/GET", "/POST", "/PUT", "/DELETE", "/CLEAR", "/HELP", "/EXIT"}
-	flags             = []string{"-", "-d", "-v", "-o"}
+	// Styles
+	titleStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("205")),
+		Bold(true).
+		Padding(0, 1)
+
+	sectionStyle = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240"))
+
+	suggestionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	activeStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+	helpStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+
+	// Autocomplete data
+	commands = []string{"/GET", "/POST", "/PUT", "/DELETE", "/HISTORY", "/CLEAR", "/HELP", "/EXIT"}
+	flags    = []string{"-H", "-d", "-v", "-o"}
 )
 
 func InitialModel() model {
 	ti := textinput.New()
-	ti.Placeholder = "Type a command (e.g., /GET https://httpbin.org/get) or /help"
+	ti.Placeholder = "Type a command..."
 	ti.Focus()
-	ti.CharLimit = 256
-	ti.Width = 80
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
-	vp := viewport.New(80, 10)
-	vp.SetContent("Welcome to go-curl!")
+	historyVP := viewport.New(10, 5)
+	historyVP.SetContent("Welcome to go-curl! Type /help for commands.")
+
+	outputVP := viewport.New(10, 10)
+	outputVP.SetContent("Response output will appear here.")
 
 	return model{
-		textInput:   ti,
-		spinner:     s,
-		viewport:    vp,
-		suggestions: []string{},
+		textInput:      ti,
+		spinner:        s,
+	historyViewport: historyVP,
+		outputViewport: outputVP,
+		suggestions:    []string{},
+		requestHistory: []string{},
+		historyIndex:   0,
+		status:         "N/A",
 	}
 }
 
@@ -83,17 +105,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case tea.KeyUp:
 			if m.isSuggesting && len(m.suggestions) > 0 {
-				m.activeSuggestion--
-				if m.activeSuggestion < 0 {
-					m.activeSuggestion = len(m.suggestions) - 1
+				m.activeSuggestion = (m.activeSuggestion - 1 + len(m.suggestions)) % len(m.suggestions)
+			} else if !m.isSuggesting && len(m.requestHistory) > 0 {
+				if m.historyIndex > 0 {
+					m.historyIndex--
 				}
+				m.textInput.SetValue(m.requestHistory[m.historyIndex])
+				m.textInput.CursorEnd()
 			}
 		case tea.KeyDown:
 			if m.isSuggesting && len(m.suggestions) > 0 {
-				m.activeSuggestion++
-				if m.activeSuggestion >= len(m.suggestions) {
-					m.activeSuggestion = 0
+				m.activeSuggestion = (m.activeSuggestion + 1) % len(m.suggestions)
+			} else if !m.isSuggesting && len(m.requestHistory) > 0 {
+				if m.historyIndex < len(m.requestHistory)-1 {
+					m.historyIndex++
+					m.textInput.SetValue(m.requestHistory[m.historyIndex])
+				} else {
+					m.historyIndex = len(m.requestHistory)
+					m.textInput.SetValue("")
 				}
+				m.textInput.CursorEnd()
 			}
 		case tea.KeyTab, tea.KeyEnter:
 			if m.isSuggesting && len(m.suggestions) > 0 {
@@ -118,15 +149,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.WindowSizeMsg:
-		m.textInput.Width = msg.Width - 2
-		m.viewport.Width = msg.Width - 2
-		m.viewport.Height = msg.Height - 5
+		m.width = msg.Width
+		m.height = msg.Height
+		sectionWidth := msg.Width - 2
+
+		// Input section height is static
+		inputHeight := 4 + (len(m.suggestions)+3)/4
+		
+		// Remaining height is split between history and output
+		remainingHeight := msg.Height - inputHeight - 3 // 3 for borders/margins
+		historyHeight := remainingHeight / 3
+		outputHeight := remainingHeight - historyHeight
+
+		m.textInput.Width = sectionWidth - 2
+		
+		m.historyViewport.Width = sectionWidth
+		m.historyViewport.Height = historyHeight
+		
+m.outputViewport.Width = sectionWidth
+		m.outputViewport.Height = outputHeight
+
 
 	case responseMsg:
 		m.isLoading = false
-		m.history = append(m.history, string(msg))
-		m.viewport.SetContent(strings.Join(m.history, "\n"))
-		m.viewport.GotoBottom()
+		m.status = msg.status
+		m.outputViewport.SetContent(formatJSON(msg.body))
+		m.outputViewport.GotoTop()
+		m.history = append(m.history, "✓ Request finished with status: "+msg.status)
+		m.historyViewport.SetContent(strings.Join(m.history, "\n"))
+		m.historyViewport.GotoBottom()
 
 	case spinner.TickMsg:
 		if m.isLoading {
@@ -137,6 +188,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	m.textInput, cmd = m.textInput.Update(msg)
 	cmds = append(cmds, cmd)
+	m.historyViewport, cmd = m.historyViewport.Update(msg)
+	cmds = append(cmds, cmd)
+	m.outputViewport, cmd = m.outputViewport.Update(msg)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -171,12 +227,12 @@ func (m *model) updateSuggestions() {
 	m.activeSuggestion = 0
 }
 
-func (m model) handleEnter() (tea.Model, tea.Cmd) {
+func (m *model) handleEnter() (tea.Model, tea.Cmd) {
 	userInput := m.textInput.Value()
 	m.history = append(m.history, "> "+userInput)
-	m.viewport.SetContent(strings.Join(m.history, "\n"))
+	m.historyViewport.SetContent(strings.Join(m.history, "\n"))
 	m.textInput.Reset()
-	m.viewport.GotoBottom()
+	m.historyViewport.GotoBottom()
 
 	parts, err := parser.ParseCommand(userInput)
 	if err != nil {
@@ -192,12 +248,19 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "/CLEAR":
 		m.history = []string{}
-		m.viewport.SetContent("")
+		m.historyViewport.SetContent("")
+		m.outputViewport.SetContent("")
+		m.status = "N/A"
 		return m, nil
 	case "/HELP":
 		m.history = append(m.history, getHelp())
 		return m, nil
+	case "/HISTORY":
+		m.history = append(m.history, m.getUniqueHistory())
+		return m, nil
 	case "/GET", "/POST", "/PUT", "/DELETE":
+		m.requestHistory = append(m.requestHistory, userInput)
+		m.historyIndex = len(m.requestHistory)
 		m.isLoading = true
 		return m, tea.Batch(m.spinner.Tick, makeRequest(command[1:], args))
 	default:
@@ -208,8 +271,7 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 
 func makeRequest(method string, args []string) tea.Cmd {
 	return func() tea.Msg {
-		// A short delay to make the spinner visible
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 
 		fs := flag.NewFlagSet(method, flag.ContinueOnError)
 		var headers []string
@@ -222,12 +284,13 @@ func makeRequest(method string, args []string) tea.Cmd {
 		outputFile := fs.String("o", "", "Output file")
 
 		if len(args) == 0 {
-			return responseMsg("Usage: /" + method + " <url> [flags]")
+			return responseMsg{status: "Error", body: "Usage: /" + method + " <url> [flags]"}
 		}
 		url := args[0]
 		fs.Parse(args[1:])
 
-		curlArgs := []string{"curl", "-X", method, url}
+		// Add -i to include headers in the output
+		curlArgs := []string{"curl", "-i", "-X", method, url}
 		for _, h := range headers {
 			curlArgs = append(curlArgs, "-H", h)
 		}
@@ -243,50 +306,115 @@ func makeRequest(method string, args []string) tea.Cmd {
 
 		output, err := executor.ExecuteAndCapture(curlArgs)
 		if err != nil {
-			return responseMsg(fmt.Sprintf("Error: %v\n%s", err, output))
+			return responseMsg{status: "Execution Error", body: fmt.Sprintf("%v\n%s", err, output)}
 		}
-		return responseMsg(output)
+
+		// Parse response
+		parts := strings.SplitN(output, "\r\n\r\n", 2)
+		if len(parts) < 2 {
+			// Handle cases with no body or different line endings
+			parts = strings.SplitN(output, "\n\n", 2)
+			if len(parts) < 2 {
+				return responseMsg{status: "Parse Error", body: "Could not separate headers from body."}
+			}
+		}
+		headerBlock := parts[0]
+		body := parts[1]
+		statusLine := strings.SplitN(headerBlock, "\n", 2)[0]
+
+		return responseMsg{status: strings.TrimSpace(statusLine), body: body}
 	}
+}
+
+func (m *model) getUniqueHistory() string {
+	var uniqueHistory []string
+	seen := make(map[string]bool)
+	for i := len(m.requestHistory) - 1; i >= 0; i-- {
+		cmd := m.requestHistory[i]
+		if !seen[cmd] {
+			seen[cmd] = true
+			uniqueHistory = append(uniqueHistory, cmd)
+		}
+		if len(uniqueHistory) >= 10 {
+			break
+		}
+	}
+	if len(uniqueHistory) == 0 {
+		return "No request history yet."
+	}
+	var b strings.Builder
+	b.WriteString("Last 10 unique requests:\n")
+	for i := len(uniqueHistory) - 1; i >= 0; i-- {
+		b.WriteString(fmt.Sprintf("  %s\n", uniqueHistory[i]))
+	}
+	return b.String()
+}
+
+func (m model) View() string {
+	// --- INPUT SECTION ---
+	var inputBuilder strings.Builder
+	inputBuilder.WriteString(m.textInput.View())
+	if m.isSuggesting && len(m.suggestions) > 0 {
+		inputBuilder.WriteString("\n")
+		var suggestionParts []string
+		for i, sug := range m.suggestions {
+			if i == m.activeSuggestion {
+				suggestionParts = append(suggestionParts, activeStyle.Render(sug))
+			} else {
+				suggestionParts = append(suggestionParts, suggestionStyle.Render(sug))
+			}
+		}
+		inputBuilder.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, suggestionParts...))
+	} else {
+		inputBuilder.WriteString("\n" + helpStyle.Render("↑/↓ for history, <tab> to complete"))
+	}
+	inputSection := sectionStyle.
+		Copy().
+		Width(m.width - 2).
+		Height(4+(len(m.suggestions)+3)/4).
+		Render(titleStyle.Render("Input") + "\n" + inputBuilder.String())
+
+	// --- HISTORY SECTION ---
+	historySection := sectionStyle.
+		Copy().
+		Width(m.width - 2).
+		Height(m.historyViewport.Height).
+		Render(titleStyle.Render("History") + "\n" + m.historyViewport.View())
+
+	// --- OUTPUT SECTION ---
+	statusLine := fmt.Sprintf("Status: %s", m.status)
+	outputSection := sectionStyle.
+		Copy().
+		Width(m.width - 2).
+		Height(m.outputViewport.Height).
+		Render(titleStyle.Render("Output") + "\n" + statusLine + "\n" + m.outputViewport.View())
+
+	// --- FINAL LAYOUT ---
+	return lipgloss.JoinVertical(lipgloss.Left,
+		inputSection,
+		historySection,
+		outputSection,
+	)
 }
 
 func getHelp() string {
 	return `Available commands:
   /GET, /POST, /PUT, /DELETE <url> [flags]
+  /history             - Show last 10 unique requests
   /help                - Show this help message
-  /clear               - Clear the screen
-  /exit                - Exit the application
-Flags:
-  -H <header>          - Custom header (e.g., 'Content-Type: application/json')
-  -d <data>            - Request body for POST and PUT
-  -v                   - Verbose output
-  -o <file>            - Save response to a file`
+  /clear               - Clear all views
+  /exit                - Exit the application`
 }
 
-func (m model) View() string {
-	var s strings.Builder
-
-	s.WriteString(viewportStyle.Render(m.viewport.View()))
-	s.WriteString("\n")
-
-	if m.isLoading {
-		s.WriteString(fmt.Sprintf("%s Executing request...", m.spinner.View()))
-	} else {
-		s.WriteString(inputStyle.Render(m.textInput.View()))
+func formatJSON(raw string) string {
+	var parsed json.RawMessage
+	err := json.Unmarshal([]byte(raw), &parsed)
+	if err != nil {
+		return raw // Not valid JSON, return as is
 	}
-
-	if m.isSuggesting && len(m.suggestions) > 0 {
-		s.WriteString("\n")
-		for i, sug := range m.suggestions {
-			if i == m.activeSuggestion {
-				s.WriteString(activeStyle.Render(sug))
-			} else {
-				s.WriteString(suggestionStyle.Render(sug))
-			}
-			s.WriteString("  ")
-		}
-	} else {
-		s.WriteString("\n" + helpStyle.Render("↑/↓ to navigate suggestions, <tab> to complete, <enter> to execute"))
+	pretty, err := json.MarshalIndent(parsed, "", "  ")
+	if err != nil {
+		return raw // Should not happen if unmarshal succeeded
 	}
-
-	return s.String()
+	return string(pretty)
 }
